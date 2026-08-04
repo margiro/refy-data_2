@@ -309,6 +309,7 @@
     var opts = [];
     years.forEach(function(y){ opts.push({ label: y, range: { kind:"year", year:y } }); });
     opts.push({ sep: true });
+    opts.push({ label: "1M",  range: { kind:"last", months:1 } });
     opts.push({ label: "3M",  range: { kind:"last", months:3 } });
     opts.push({ label: "6M",  range: { kind:"last", months:6 } });
     opts.push({ label: "12M", range: { kind:"last", months:12 } });
@@ -446,6 +447,54 @@
     return buckets.map(function(arr){ return { n: arr.length, avg: arr.length ? mean(arr) : null }; });
   }
 
+  // Para cada mes del rango: promedia todos los lunes, martes... y devuelve
+  // el día de la semana con mejor y peor media.
+  function computeWeekdayByMonth(buckets) {
+    return buckets.map(function(b){
+      var sub = allEntries.filter(function(e){ return e.date.startsWith(b.key); });
+      if (!sub.length) return { label: b.label, empty: true };
+      var wk = computeWeekday(sub);
+      var best = null, worst = null;
+      wk.forEach(function(d, i){
+        if (d.avg == null) return;
+        if (!best  || d.avg > best.avg)  best  = { i: i, avg: d.avg, n: d.n };
+        if (!worst || d.avg < worst.avg) worst = { i: i, avg: d.avg, n: d.n };
+      });
+      // con un solo día de la semana presente, mejor y peor coinciden: no aporta
+      var distinct = wk.filter(function(d){ return d.avg != null; }).length;
+      return { label: b.label, n: sub.length, wk: wk, best: best, worst: worst, empty: false, single: distinct < 2 };
+    });
+  }
+
+  // Récord por ítem: mes del periodo en el que su frecuencia fue máxima.
+  // Frecuencia = nº de días en que se marcó / nº de días con entrada de ese mes.
+  function computeRecords(buckets, items, field) {
+    var months = buckets.map(function(b){
+      var sub = allEntries.filter(function(e){ return e.date.startsWith(b.key); });
+      return { label: b.label, n: sub.length, sub: sub };
+    }).filter(function(m){ return m.n > 0; });
+
+    return items.map(function(item){
+      var best = null, totalDays = 0, totalEntries = 0;
+      months.forEach(function(m){
+        var days = m.sub.filter(function(e){ return (e[field]||[]).indexOf(item) >= 0; }).length;
+        totalDays += days; totalEntries += m.n;
+        var rate = days / m.n;
+        if (days > 0 && (!best || rate > best.rate)) best = { label: m.label, rate: rate, days: days, n: m.n };
+      });
+      return {
+        item: item, best: best,
+        totalDays: totalDays,
+        overall: totalEntries > 0 ? totalDays / totalEntries : 0
+      };
+    }).sort(function(a,b){
+      if (!a.best && !b.best) return 0;
+      if (!a.best) return 1;
+      if (!b.best) return -1;
+      return b.best.rate - a.best.rate;
+    });
+  }
+
   function computeHistogram(entries) {
     var scores = entries.map(function(e){ return e.score || 0; });
     var min = Math.min.apply(null, scores), max = Math.max.apply(null, scores);
@@ -555,6 +604,13 @@
       "#6c8ebf", { yMin: 0, tooltipUnit: " días", xMaxTicks: 12, tight: true, hist: hist });
     pushWeekdayChart("chartWeekday", wk);
 
+    // ── 4b. Mejor / peor día de la semana en cada mes ──
+    main.appendChild(fullSection(
+      "Ánimo por día de la semana y mes",
+      "Cada celda es la media de ese día de la semana dentro de ese mes (p. ej. todos los martes de marzo). En verde el mejor día de cada mes y en rojo el peor; las dos últimas filas los resumen.",
+      weekdayByMonthTable(computeWeekdayByMonth(buckets))
+    ));
+
     // ── 5. Impacto actividades ──
     var actImpact = computeImpact(entries, ACTIVITIES, "activities");
     main.appendChild(fullSection(
@@ -586,18 +642,18 @@
       "Emociones por periodo (%)",
       "Peso de cada emoción sobre el total de emociones registradas. Colores por valencia (verdes positivas, rojos negativas).",
       multiTable(monthly, EMOTIONS, "emoPct"),
-      chartCard("chartEmo", "Área apilada", "chart-wrap-tall")
+      chartCard("chartEmo", "Evolución por emoción", "chart-wrap-tall")
     ));
-    pushStackedArea("chartEmo", labels, monthly, EMO_STACK_ORDER, "emoPct", function(item){ return EMO_COLOR[item] || "#888"; });
+    pushMultiLine("chartEmo", labels, monthly, EMO_STACK_ORDER, "emoPct", function(item){ return EMO_COLOR[item] || "#888"; });
 
     // ── 9. Actividades % ──
     main.appendChild(makeSection(
       "Actividades por periodo (%)",
       "Peso de cada actividad sobre el total de actividades registradas.",
       multiTable(monthly, ACTIVITIES, "actPct"),
-      chartCard("chartAct", "Área apilada", "chart-wrap-tall")
+      chartCard("chartAct", "Evolución por actividad", "chart-wrap-tall")
     ));
-    pushStackedArea("chartAct", labels, monthly, ACTIVITIES, "actPct", function(item){ return PALETTE[ACTIVITIES.indexOf(item) % PALETTE.length]; });
+    pushMultiLine("chartAct", labels, monthly, ACTIVITIES, "actPct", function(item){ return PALETTE[ACTIVITIES.indexOf(item) % PALETTE.length]; });
 
     // ── 10. Densidad ──
     main.appendChild(fullSection(
@@ -606,6 +662,19 @@
       chartCard("chartDensity", "Emociones/día · Actividades/día")
     ));
     pushDensityChart("chartDensity", labels, monthly);
+
+    // ── 10b. Récords por emoción y actividad ──
+    var recWrap = document.createElement("div");
+    recWrap.appendChild(sectionHead(
+      "Récords por emoción y actividad",
+      "Mes del periodo en que cada ítem alcanzó su frecuencia máxima. Frecuencia = días en que lo marcaste ÷ días con entrada de ese mes. La última columna es la frecuencia media de todo el periodo, para contrastar."
+    ));
+    var recBlock = document.createElement("div");
+    recBlock.className = "two-col";
+    recBlock.appendChild(recordsTable(computeRecords(buckets, EMOTIONS, "emotions"), "Emoción"));
+    recBlock.appendChild(recordsTable(computeRecords(buckets, ACTIVITIES, "activities"), "Actividad"));
+    recWrap.appendChild(recBlock);
+    main.appendChild(recWrap);
 
     // ── 11. Mejores y peores días ──
     main.appendChild(bestWorstSection(entries));
@@ -762,6 +831,100 @@
     return wrap;
   }
 
+  // Meses en COLUMNAS, días de la semana en FILAS.
+  // Celda (fila j, col i) = media del día j dentro del mes i.
+  // Dos filas finales: mejor y peor día de la semana de cada mes.
+  function weekdayByMonthTable(cols) {
+    var wrap = document.createElement("div");
+    wrap.className = "data-table-wrap scroll-x";
+    var titleEl = document.createElement("div");
+    titleEl.className = "data-table-title";
+    titleEl.textContent = "Ánimo medio por día de la semana y mes";
+    wrap.appendChild(titleEl);
+
+    var table = document.createElement("table");
+    table.className = "multi-table";
+
+    var head = "<thead><tr><th>Día</th>";
+    cols.forEach(function(c){ head += "<th>" + escapeHtml(c.label) + "</th>"; });
+    head += "</tr></thead>";
+    table.innerHTML = head;
+
+    var tbody = document.createElement("tbody");
+
+    // Una fila por día de la semana
+    WEEKDAYS.forEach(function(wdName, j) {
+      var tr = document.createElement("tr");
+      var cells = '<td class="month-col">' + wdName + '</td>';
+      cols.forEach(function(c){
+        if (c.empty || !c.wk || c.wk[j].avg == null) {
+          cells += '<td style="color:var(--muted)">—</td>';
+        } else {
+          var isBest  = c.best  && !c.single && c.best.i  === j;
+          var isWorst = c.worst && !c.single && c.worst.i === j;
+          var cls = isBest ? "val val-up" : (isWorst ? "val val-down" : "val");
+          cells += '<td class="' + cls + '" title="' + c.wk[j].n + ' registros">' + f3(c.wk[j].avg) + '</td>';
+        }
+      });
+      tr.innerHTML = cells;
+      tbody.appendChild(tr);
+    });
+
+    // Filas resumen: mejor y peor día de cada mes
+    function summaryRow(label, pick, cls) {
+      var tr = document.createElement("tr");
+      tr.style.borderTop = "1px solid var(--border)";
+      var cells = '<td class="month-col" style="color:var(--txt);font-weight:700;">' + label + '</td>';
+      cols.forEach(function(c){
+        var p = pick(c);
+        if (c.empty || c.single || !p) cells += '<td style="color:var(--muted)">—</td>';
+        else cells += '<td class="val ' + cls + '" style="font-weight:700;">' + WEEKDAYS[p.i] + '</td>';
+      });
+      tr.innerHTML = cells;
+      return tr;
+    }
+    tbody.appendChild(summaryRow("Mejor día", function(c){ return c.best;  }, "val-up"));
+    tbody.appendChild(summaryRow("Peor día",  function(c){ return c.worst; }, "val-down"));
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
+  function recordsTable(records, colLabel) {
+    var wrap = document.createElement("div");
+    wrap.className = "data-table-wrap";
+    var titleEl = document.createElement("div");
+    titleEl.className = "data-table-title";
+    titleEl.textContent = colLabel;
+    wrap.appendChild(titleEl);
+
+    var table = document.createElement("table");
+    table.innerHTML = "<thead><tr><th>" + escapeHtml(colLabel) + "</th><th>Mes récord</th><th>Frecuencia</th><th>Media periodo</th></tr></thead>";
+    var tbody = document.createElement("tbody");
+
+    records.forEach(function(r){
+      var tr = document.createElement("tr");
+      if (!r.best) {
+        tr.innerHTML = '<td class="month-col" style="color:var(--txt)">' + escapeHtml(r.item) + '</td>' +
+                       '<td colspan="3" style="color:var(--muted)">sin registros</td>';
+      } else {
+        var pct = (r.best.rate * 100);
+        var overallPct = (r.overall * 100);
+        tr.innerHTML =
+          '<td class="month-col" style="color:var(--txt)">' + escapeHtml(r.item) + '</td>' +
+          '<td class="val val-accent">' + escapeHtml(r.best.label) + '</td>' +
+          '<td class="val val-up" title="' + r.best.days + ' de ' + r.best.n + ' días con entrada">' +
+            pct.toFixed(1) + '% <span style="color:var(--muted);font-weight:400;">(' + r.best.days + '/' + r.best.n + ')</span></td>' +
+          '<td class="val" style="color:var(--muted)">' + overallPct.toFixed(1) + '%</td>';
+      }
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
   function bestWorstSection(entries) {
     var wrap = document.createElement("div");
     wrap.appendChild(sectionHead("Mejores y peores días", "Los 5 días de mayor y menor puntuación del periodo, con lo que registraste."));
@@ -862,7 +1025,7 @@
   function pushWeekdayChart(id, wk) {
     renderQueue.push(function(){
       var cv = document.getElementById(id); if (!cv) return;
-      var data = wk.map(function(d){ return d.avg != null ? +d.avg.toFixed(2) : null; });
+      var data = wk.map(function(d){ return d.avg != null ? +d.avg.toFixed(3) : null; });
       var valid = data.filter(function(v){ return v != null; });
       var lo = valid.length ? Math.max(0, Math.floor(Math.min.apply(null, valid) - 0.5)) : 0;
       var hi = valid.length ? Math.min(10, Math.ceil(Math.max.apply(null, valid) + 0.5)) : 10;
@@ -934,7 +1097,7 @@
     });
   }
 
-  function pushStackedArea(id, labels, monthly, items, key, colorFn) {
+  function pushMultiLine(id, labels, monthly, items, key, colorFn) {
     renderQueue.push(function(){
       var cv = document.getElementById(id); if (!cv) return;
       var datasets = items.map(function(item){
@@ -942,7 +1105,10 @@
         return {
           label: item,
           data: monthly.map(function(m){ return m ? +(m[key][item]||0).toFixed(1) : null; }),
-          borderColor: c, backgroundColor: c + "cc", fill: true, tension: 0.3, pointRadius: 0, borderWidth: 1
+          borderColor: c, backgroundColor: c + "22",
+          fill: false, tension: 0.35, borderWidth: 2,
+          pointRadius: 2.5, pointHoverRadius: 5, pointBackgroundColor: c,
+          spanGaps: false
         };
       });
       charts[id] = new Chart(cv, {
@@ -951,9 +1117,9 @@
         options: {
           responsive: true, maintainAspectRatio: false,
           interaction: { intersect: false, mode: "index" },
-          plugins: { legend: { display: true, labels: { color: CD.color, boxWidth: 10, font: { size: 10 } } },
+          plugins: { legend: { display: true, labels: { color: CD.color, boxWidth: 10, font: { size: 10 }, usePointStyle: true } },
             tooltip: { backgroundColor: CD.tip, padding: 10, callbacks: { label: function(c){ return c.dataset.label + ": " + (c.parsed.y != null ? c.parsed.y + "%" : "-"); } } } },
-          scales: { x: baseScales().x, y: { stacked: true, min: 0, grid: { color: CD.grid }, ticks: { color: CD.color, font: { size: 11 }, callback: function(v){ return v + "%"; } } } }
+          scales: { x: baseScales().x, y: { min: 0, grid: { color: CD.grid }, ticks: { color: CD.color, font: { size: 11 }, callback: function(v){ return v + "%"; } } } }
         }
       });
     });
